@@ -1,20 +1,82 @@
 import { PageConfig, URLExt } from '@jupyterlab/coreutils';
 
+import { PromiseDelegate } from '@lumino/coreutils';
+
 import * as json5 from 'json5';
 
-import localforage from 'localforage';
+import type localforage from 'localforage';
 
-import { IFederatedExtension, IPlugin } from './tokens';
+import { IPlugin, ISettings, SettingsFile } from './tokens';
 
 /**
  * The name of the local storage.
  */
-const STORAGE_NAME = 'JupyterLite Storage';
+const DEFAULT_STORAGE_NAME = 'JupyterLite Storage';
 
 /**
  * A class to handle requests to /api/settings
  */
-export class Settings {
+export class Settings implements ISettings {
+  constructor(options: Settings.IOptions) {
+    this._localforage = options.localforage;
+    this._storageName = options.storageName || DEFAULT_STORAGE_NAME;
+    this._storageDrivers = options.storageDrivers || null;
+
+    this._ready = new PromiseDelegate();
+  }
+
+  /**
+   * A promise that resolves when the settings storage is fully initialized
+   */
+  get ready(): Promise<void> {
+    return this._ready.promise;
+  }
+
+  /**
+   * A lazy reference to initialized storage
+   */
+  protected get storage(): Promise<LocalForage> {
+    return this.ready.then(() => this._storage as LocalForage);
+  }
+
+  /**
+   * Finish any initialization after server has started and all extensions are applied.
+   */
+  async initialize() {
+    await this.initStorage();
+    this._ready.resolve(void 0);
+  }
+
+  /**
+   * Prepare the storage
+   */
+  protected async initStorage() {
+    this._storage = this.defaultSettingsStorage();
+  }
+
+  /**
+   * Get default options for localForage instances
+   */
+  protected get defaultStorageOptions(): LocalForageOptions {
+    const driver = this._storageDrivers?.length ? this._storageDrivers : null;
+    return {
+      version: 1,
+      name: this._storageName,
+      ...(driver ? { driver } : {}),
+    };
+  }
+
+  /**
+   * Create a settings store.
+   */
+  protected defaultSettingsStorage(): LocalForage {
+    return this._localforage.createInstance({
+      description: 'Offline Storage for Settings',
+      storeName: 'settings',
+      ...this.defaultStorageOptions,
+    });
+  }
+
   /**
    * Get settings by plugin id
    *
@@ -24,35 +86,40 @@ export class Settings {
   async get(pluginId: string): Promise<IPlugin | undefined> {
     const all = await this.getAll();
     const settings = all.settings as IPlugin[];
-    let found = settings.find((setting: IPlugin) => {
+    const setting = settings.find((setting: IPlugin) => {
       return setting.id === pluginId;
     });
-
-    if (!found) {
-      found = await this._getFederated(pluginId);
-    }
-
-    return found;
+    return setting;
   }
 
   /**
    * Get all the settings
    */
   async getAll(): Promise<{ settings: IPlugin[] }> {
-    const settingsUrl = PageConfig.getOption('settingsUrl') ?? '/';
-    const all = (await (
-      await fetch(URLExt.join(settingsUrl, 'all.json'))
-    ).json()) as IPlugin[];
+    const allCore = await this._getAll('all.json');
+    let allFederated: IPlugin[] = [];
+    try {
+      allFederated = await this._getAll('all_federated.json');
+    } catch {
+      // handle the case where there is no federated extension
+    }
+
+    // JupyterLab 4 expects all settings to be returned in one go
+    // so append the settings from federated plugins to the core ones
+    const all = allCore.concat(allFederated);
+
+    // return existing user settings if they exist
+    const storage = await this.storage;
     const settings = await Promise.all(
-      all.map(async plugin => {
+      all.map(async (plugin) => {
         const { id } = plugin;
-        const raw = ((await this._storage.getItem(id)) as string) ?? plugin.raw;
+        const raw = ((await storage.getItem(id)) as string) ?? plugin.raw;
         return {
           ...Private.override(plugin),
           raw,
-          settings: json5.parse(raw)
+          settings: json5.parse(raw),
         };
-      })
+      }),
     );
     return { settings };
   }
@@ -65,49 +132,39 @@ export class Settings {
    *
    */
   async save(pluginId: string, raw: string): Promise<void> {
-    await this._storage.setItem(pluginId, raw);
+    await (await this.storage).setItem(pluginId, raw);
   }
 
   /**
-   * Get the settings for a federated extension
-   *
-   * @param pluginId The id of a plugin
+   * Get all the settings for core or federated plugins
    */
-  private async _getFederated(pluginId: string): Promise<IPlugin | undefined> {
-    const [packageName, schemaName] = pluginId.split(':');
-
-    if (!Private.isFederated(packageName)) {
-      return;
-    }
-
-    const labExtensionsUrl = PageConfig.getOption('fullLabextensionsUrl');
-    const schemaUrl = URLExt.join(
-      labExtensionsUrl,
-      packageName,
-      'schemas',
-      packageName,
-      `${schemaName}.json`
-    );
-    const packageUrl = URLExt.join(labExtensionsUrl, packageName, 'package.json');
-    const schema = await (await fetch(schemaUrl)).json();
-    const packageJson = await (await fetch(packageUrl)).json();
-    const raw = ((await this._storage.getItem(pluginId)) as string) ?? '{}';
-    const settings = json5.parse(raw) || {};
-    return Private.override({
-      id: pluginId,
-      raw,
-      schema,
-      settings,
-      version: packageJson.version || '3.0.8'
-    });
+  private async _getAll(file: SettingsFile): Promise<IPlugin[]> {
+    const settingsUrl = PageConfig.getOption('settingsUrl') ?? '/';
+    const all = (await (
+      await fetch(URLExt.join(settingsUrl, file))
+    ).json()) as IPlugin[];
+    return all;
   }
 
-  private _storage = localforage.createInstance({
-    name: STORAGE_NAME,
-    description: 'Offline Storage for Settings',
-    storeName: 'settings',
-    version: 1
-  });
+  private _storageName: string = DEFAULT_STORAGE_NAME;
+  private _storageDrivers: string[] | null = null;
+  private _storage: LocalForage | undefined;
+  private _localforage: typeof localforage;
+  private _ready: PromiseDelegate<void>;
+}
+
+/**
+ * A namespace for settings metadata.
+ */
+export namespace Settings {
+  /**
+   * Initialization options for settings.
+   */
+  export interface IOptions {
+    localforage: typeof localforage;
+    storageName?: string | null;
+    storageDrivers?: string[] | null;
+  }
 }
 
 /**
@@ -115,31 +172,8 @@ export class Settings {
  */
 namespace Private {
   const _overrides: Record<string, IPlugin['schema']['default']> = JSON.parse(
-    PageConfig.getOption('settingsOverrides') || '{}'
+    PageConfig.getOption('settingsOverrides') || '{}',
   );
-
-  /**
-   * Test whether this package is configured in `federated_extensions` in this app
-   *
-   * @param packageName The npm name of a package
-   */
-  export function isFederated(packageName: string): boolean {
-    let federated: IFederatedExtension[];
-
-    try {
-      federated = JSON.parse(PageConfig.getOption('federated_extensions'));
-    } catch {
-      return false;
-    }
-
-    for (const { name } of federated) {
-      if (name === packageName) {
-        return true;
-      }
-    }
-
-    return false;
-  }
 
   /**
    * Override the defaults of the schema with ones from PageConfig

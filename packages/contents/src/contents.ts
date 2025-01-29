@@ -1,60 +1,136 @@
 import { PageConfig, URLExt } from '@jupyterlab/coreutils';
-import { Contents as ServerContents, ServerConnection } from '@jupyterlab/services';
+
+import { Contents as ServerContents } from '@jupyterlab/services';
 
 import { INotebookContent } from '@jupyterlab/nbformat';
 
-import { ModelDB } from '@jupyterlab/observables';
-
 import { PathExt } from '@jupyterlab/coreutils';
 
-import { ISignal, Signal } from '@lumino/signaling';
+import type localforage from 'localforage';
 
-import localforage from 'localforage';
+import { IContents, MIME, FILE } from './tokens';
+import { PromiseDelegate } from '@lumino/coreutils';
 
-import { IContents } from './tokens';
+export type IModel = ServerContents.IModel;
 
 /**
  * The name of the local storage.
  */
-const STORAGE_NAME = 'JupyterLite Storage';
+const DEFAULT_STORAGE_NAME = 'JupyterLite Storage';
 
 /**
  * The number of checkpoints to save.
  */
 const N_CHECKPOINTS = 5;
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder('utf-8');
+
 /**
  * A class to handle requests to /api/contents
  */
 export class Contents implements IContents {
   /**
-   * A signal emitted when the file has changed.
+   * Construct a new localForage-powered contents provider
    */
-  get fileChanged(): ISignal<ServerContents.IManager, ServerContents.IChangedArgs> {
-    return this._fileChanged;
+  constructor(options: Contents.IOptions) {
+    this._localforage = options.localforage;
+    this._storageName = options.storageName || DEFAULT_STORAGE_NAME;
+    this._storageDrivers = options.storageDrivers || null;
+    this._ready = new PromiseDelegate();
   }
 
   /**
-   * Test whether the manager has been disposed.
+   * Finish any initialization after server has started and all extensions are applied.
    */
-  get isDisposed(): boolean {
-    return this._isDisposed;
+  async initialize() {
+    await this.initStorage();
+    this._ready.resolve(void 0);
   }
 
   /**
-   * Return the server settings.
+   * Initialize all storage instances
    */
-  get serverSettings(): ServerConnection.ISettings {
-    // TODO: placeholder
-    return ServerConnection.makeSettings();
+  protected async initStorage(): Promise<void> {
+    this._storage = this.createDefaultStorage();
+    this._counters = this.createDefaultCounters();
+    this._checkpoints = this.createDefaultCheckpoints();
   }
 
   /**
-   * Dispose of the resources held by the manager.
+   * A promise that resolves once all storage is fully initialized.
    */
-  dispose(): void {
-    throw new Error('Method not implemented.');
+  get ready(): Promise<void> {
+    return this._ready.promise;
   }
+
+  /**
+   * A lazy reference to the underlying storage.
+   */
+  protected get storage(): Promise<LocalForage> {
+    return this.ready.then(() => this._storage as LocalForage);
+  }
+
+  /**
+   * A lazy reference to the underlying counters.
+   */
+  protected get counters(): Promise<LocalForage> {
+    return this.ready.then(() => this._counters as LocalForage);
+  }
+
+  /**
+   * A lazy reference to the underlying checkpoints.
+   */
+  protected get checkpoints(): Promise<LocalForage> {
+    return this.ready.then(() => this._checkpoints as LocalForage);
+  }
+
+  /**
+   * Get default options for localForage instances
+   */
+  protected get defaultStorageOptions(): LocalForageOptions {
+    const driver =
+      this._storageDrivers && this._storageDrivers.length ? this._storageDrivers : null;
+    return {
+      version: 1,
+      name: this._storageName,
+      ...(driver ? { driver } : {}),
+    };
+  }
+
+  /**
+   * Initialize the default storage for contents.
+   */
+  protected createDefaultStorage(): LocalForage {
+    return this._localforage.createInstance({
+      description: 'Offline Storage for Notebooks and Files',
+      storeName: 'files',
+      ...this.defaultStorageOptions,
+    });
+  }
+
+  /**
+   * Initialize the default storage for counting file suffixes.
+   */
+  protected createDefaultCounters(): LocalForage {
+    return this._localforage.createInstance({
+      description: 'Store the current file suffix counters',
+      storeName: 'counters',
+      ...this.defaultStorageOptions,
+    });
+  }
+
+  /**
+   * Create the default checkpoint storage.
+   */
+  protected createDefaultCheckpoints(): LocalForage {
+    return this._localforage.createInstance({
+      description: 'Offline Storage for Checkpoints',
+      storeName: 'checkpoints',
+      ...this.defaultStorageOptions,
+    });
+  }
+
   /**
    * Create a new untitled file or directory in the specified directory path.
    *
@@ -62,74 +138,102 @@ export class Contents implements IContents {
    *
    * @returns A promise which resolves with the created file content when the file is created.
    */
-  async newUntitled(
-    options?: ServerContents.ICreateOptions
-  ): Promise<ServerContents.IModel> {
+  async newUntitled(options?: ServerContents.ICreateOptions): Promise<IModel | null> {
     const path = options?.path ?? '';
     const type = options?.type ?? 'notebook';
     const created = new Date().toISOString();
-    const prefix = path ? `${path}/` : '';
 
-    let file: ServerContents.IModel;
+    let dirname = PathExt.dirname(path);
+    const basename = PathExt.basename(path);
+    const extname = PathExt.extname(path);
+    const item = await this.get(dirname);
+
+    // handle the case of "Save As", where the path points to the new file
+    // to create, e.g. subfolder/example-copy.ipynb
     let name = '';
+    if (path && !extname && item) {
+      // directory
+      dirname = `${path}/`;
+      name = '';
+    } else if (dirname && basename) {
+      // file in a subfolder
+      dirname = `${dirname}/`;
+      name = basename;
+    } else {
+      // file at the top level
+      dirname = '';
+      name = path;
+    }
+
+    let file: IModel;
     switch (type) {
       case 'directory': {
         const counter = await this._incrementCounter('directory');
-        name += `Untitled Folder${counter || ''}`;
+        name = `Untitled Folder${counter || ''}`;
         file = {
           name,
-          path: `${prefix}${name}`,
+          path: `${dirname}${name}`,
           last_modified: created,
           created,
-          format: 'text',
+          format: 'json',
           mimetype: '',
           content: null,
-          size: undefined,
+          size: 0,
           writable: true,
-          type: 'directory'
+          type: 'directory',
         };
         break;
       }
-      case 'file': {
-        const ext = options?.ext ?? '.txt';
-        const counter = await this._incrementCounter('file');
-        name += `untitled${counter || ''}${ext}`;
+      case 'notebook': {
+        const counter = await this._incrementCounter('notebook');
+        name = name || `Untitled${counter || ''}.ipynb`;
         file = {
           name,
-          path: `${prefix}${name}`,
+          path: `${dirname}${name}`,
           last_modified: created,
           created,
-          format: 'text',
-          // TODO: handle mimetypes
-          mimetype: 'text/plain',
-          content: '',
-          size: 0,
+          format: 'json',
+          mimetype: MIME.JSON,
+          content: Private.EMPTY_NB,
+          size: encoder.encode(JSON.stringify(Private.EMPTY_NB)).length,
           writable: true,
-          type: 'file'
+          type: 'notebook',
         };
         break;
       }
       default: {
-        const counter = await this._incrementCounter('notebook');
-        name += `Untitled${counter || ''}.ipynb`;
+        const ext = options?.ext ?? '.txt';
+        const counter = await this._incrementCounter('file');
+        const mimetype = FILE.getType(ext) || MIME.OCTET_STREAM;
+
+        let format: ServerContents.FileFormat;
+        if (FILE.hasFormat(ext, 'text') || mimetype.indexOf('text') !== -1) {
+          format = 'text';
+        } else if (ext.indexOf('json') !== -1 || ext.indexOf('ipynb') !== -1) {
+          format = 'json';
+        } else {
+          format = 'base64';
+        }
+
+        name = name || `untitled${counter || ''}${ext}`;
         file = {
           name,
-          path: `${prefix}${name}`,
+          path: `${dirname}${name}`,
           last_modified: created,
           created,
-          format: 'json',
-          mimetype: 'application/json',
-          content: Private.EMPTY_NB,
-          size: JSON.stringify(Private.EMPTY_NB).length,
+          format,
+          mimetype,
+          content: '',
+          size: 0,
           writable: true,
-          type: 'notebook'
+          type: 'file',
         };
         break;
       }
     }
 
-    const key = `${prefix}${name}`;
-    await this._storage.setItem(key, file);
+    const key = file.path;
+    await (await this.storage).setItem(key, file);
     return file;
   }
 
@@ -145,9 +249,9 @@ export class Contents implements IContents {
    * #### Notes
    * The server will select the name of the copied file.
    */
-  async copy(path: string, toDir: string): Promise<ServerContents.IModel> {
+  async copy(path: string, toDir: string): Promise<IModel> {
     let name = PathExt.basename(path);
-    toDir = toDir === '' ? '' : `${toDir.slice(1)}/`;
+    toDir = toDir === '' ? '' : `${PathExt.removeSlash(toDir)}/`;
     // TODO: better handle naming collisions with existing files
     while (await this.get(`${toDir}${name}`, { content: true })) {
       const ext = PathExt.extname(name);
@@ -156,12 +260,15 @@ export class Contents implements IContents {
     }
     const toPath = `${toDir}${name}`;
     let item = await this.get(path, { content: true });
+    if (!item) {
+      throw Error(`Could not find file with path ${path}`);
+    }
     item = {
       ...item,
       name,
-      path: toPath
+      path: toPath,
     };
-    await this._storage.setItem(toPath, item);
+    await (await this.storage).setItem(toPath, item);
     return item;
   }
 
@@ -175,46 +282,46 @@ export class Contents implements IContents {
    */
   async get(
     path: string,
-    options?: ServerContents.IFetchOptions
-  ): Promise<ServerContents.IModel> {
+    options?: ServerContents.IFetchOptions,
+  ): Promise<IModel | null> {
     // remove leading slash
     path = decodeURIComponent(path.replace(/^\//, ''));
 
     if (path === '') {
-      return await this.getFolder(path);
+      return await this._getFolder(path);
     }
 
-    const item = await this._storage.getItem(path);
-    const serverItem = await this.getServerContents(path, options);
+    const storage = await this.storage;
+    const item = await storage.getItem(path);
+    const serverItem = await this._getServerContents(path, options);
 
-    const model = (item || serverItem) as ServerContents.IModel | null;
+    const model = (item || serverItem) as IModel | null;
 
     if (!model) {
-      throw Error(`Could not find file with path ${path}`);
+      return null;
     }
 
     if (!options?.content) {
       return {
+        size: 0,
         ...model,
         content: null,
-        size: undefined
       };
     }
 
     // for directories, find all files with the path as the prefix
     if (model.type === 'directory') {
-      const contentMap = new Map<string, ServerContents.IModel>();
-      await this._storage.iterate((item, key) => {
-        const file = (item as unknown) as ServerContents.IModel;
+      const contentMap = new Map<string, IModel>();
+      await storage.iterate<IModel, void>((file, key) => {
         // use an additional slash to not include the directory itself
         if (key === `${path}/${file.name}`) {
           contentMap.set(file.name, file);
         }
       });
 
-      const serverContents: ServerContents.IModel[] = serverItem
+      const serverContents: IModel[] = serverItem
         ? serverItem.content
-        : Array.from((await this.getServerDirectory(path)).values());
+        : Array.from((await this._getServerDirectory(path)).values());
       for (const file of serverContents) {
         if (!contentMap.has(file.name)) {
           contentMap.set(file.name, file);
@@ -229,161 +336,13 @@ export class Contents implements IContents {
         last_modified: model.last_modified,
         created: model.created,
         format: 'json',
-        mimetype: 'application/json',
+        mimetype: MIME.JSON,
         content,
-        size: undefined,
+        size: 0,
         writable: true,
-        type: 'directory'
+        type: 'directory',
       };
     }
-    return model;
-  }
-
-  /**
-   * retrieve the contents for this path from the union of local storage and
-   * `api/contents/{path}/all.json`.
-   *
-   * @param path - The contents path to retrieve
-   *
-   * @returns A promise which resolves with a Map of contents, keyed by local file name
-   */
-  async getFolder(path: string): Promise<ServerContents.IModel> {
-    const content = new Map<string, ServerContents.IModel>();
-    await this._storage.iterate((item, key) => {
-      if (key.includes('/')) {
-        return;
-      }
-      const file = (item as unknown) as ServerContents.IModel;
-      content.set(file.path, file);
-    });
-
-    // layer in contents that don't have local overwrites
-    for (const file of (await this.getServerDirectory(path)).values()) {
-      if (!content.has(file.path)) {
-        content.set(file.path, file);
-      }
-    }
-
-    return {
-      name: '',
-      path,
-      last_modified: new Date(0).toISOString(),
-      created: new Date(0).toISOString(),
-      format: 'json',
-      mimetype: 'application/json',
-      content: Array.from(content.values()),
-      size: undefined,
-      writable: true,
-      type: 'directory'
-    };
-  }
-
-  private _serverContents = new Map<string, Map<string, ServerContents.IModel>>();
-
-  /**
-   * retrieve the contents for this path from `__index__.json` in the appropriate
-   * folder.
-   *
-   * @param newLocalPath - The new file path.
-   *
-   * @returns A promise which resolves with a Map of contents, keyed by local file name
-   */
-  async getServerDirectory(path: string): Promise<Map<string, ServerContents.IModel>> {
-    const content = this._serverContents.get(path) || new Map();
-
-    if (!this._serverContents.has(path)) {
-      const apiURL = URLExt.join(
-        PageConfig.getBaseUrl(),
-        'api/contents',
-        path,
-        'all.json'
-      );
-
-      try {
-        const response = await fetch(apiURL);
-        const json = JSON.parse(await response.text());
-        for (const file of json['content'] as ServerContents.IModel[]) {
-          content.set(file.name, file);
-        }
-      } catch (err) {
-        console.warn(
-          `don't worry, about ${err}... nothing's broken. if there had been a
-          file at ${apiURL}, you might see some more files.`
-        );
-      }
-      this._serverContents.set(path, content);
-    }
-
-    return content;
-  }
-
-  /**
-   * Attempt to recover the model from `{:path}/__all__.json` file, fall back to
-   * deriving the model (including content) off the file in `/files/`. Otherwise
-   * return `null`.
-   */
-  async getServerContents(
-    path: string,
-    options?: ServerContents.IFetchOptions
-  ): Promise<ServerContents.IModel | null> {
-    const name = PathExt.basename(path);
-    const parentContents = await this.getServerDirectory(URLExt.join(path, '..'));
-    let model = parentContents.get(name) || {
-      name,
-      path,
-      last_modified: new Date(0).toISOString(),
-      created: new Date(0).toISOString(),
-      format: 'text',
-      mimetype: 'text/plain',
-      type: 'file',
-      writable: true,
-      content: null
-    };
-
-    if (options?.content) {
-      if (model.type === 'directory') {
-        const serverContents = await this.getServerDirectory(path);
-        model = { ...model, content: Array.from(serverContents.values()) };
-      } else {
-        const fileUrl = URLExt.join(PageConfig.getBaseUrl(), 'files', path);
-        const response = await fetch(fileUrl);
-        if (!response.ok) {
-          return null;
-        }
-        const mimetype = model.mimetype || response.headers.get('Content-Type');
-
-        if (
-          model.type === 'notebook' ||
-          mimetype?.indexOf('json') !== -1 ||
-          path.match(/\.(ipynb|[^/]*json[^/]*)$/)
-        ) {
-          model = {
-            ...model,
-            content: await response.json(),
-            format: 'json',
-            mimetype: model.mimetype || 'application/json'
-          };
-          // TODO: this is not great, need a better oracle
-        } else if (mimetype === 'image/svg+xml' || mimetype.indexOf('text') !== -1) {
-          model = {
-            ...model,
-            content: await response.text(),
-            format: 'text',
-            mimetype: mimetype || 'text/plain'
-          };
-        } else {
-          model = {
-            ...model,
-            content: btoa(
-              String.fromCharCode(...new Uint8Array(await response.arrayBuffer()))
-            ),
-            format: 'base64',
-            mimetype: mimetype || 'octet/stream'
-          };
-        }
-      }
-    }
-
     return model;
   }
 
@@ -395,10 +354,7 @@ export class Contents implements IContents {
    *
    * @returns A promise which resolves with the new file content model when the file is renamed.
    */
-  async rename(
-    oldLocalPath: string,
-    newLocalPath: string
-  ): Promise<ServerContents.IModel> {
+  async rename(oldLocalPath: string, newLocalPath: string): Promise<IModel> {
     const path = decodeURIComponent(oldLocalPath);
     const file = await this.get(path, { content: true });
     if (!file) {
@@ -410,20 +366,21 @@ export class Contents implements IContents {
       ...file,
       name,
       path: newLocalPath,
-      last_modified: modified
+      last_modified: modified,
     };
-    await this._storage.setItem(newLocalPath, newFile);
+    const storage = await this.storage;
+    await storage.setItem(newLocalPath, newFile);
     // remove the old file
-    await this._storage.removeItem(path);
+    await storage.removeItem(path);
     // remove the corresponding checkpoint
-    await this._checkpoints.removeItem(path);
+    await (await this.checkpoints).removeItem(path);
     // if a directory, recurse through all children
     if (file.type === 'directory') {
-      let child: ServerContents.IModel;
+      let child: IModel;
       for (child of file.content) {
         await this.rename(
           URLExt.join(oldLocalPath, child.name),
-          URLExt.join(newLocalPath, child.name)
+          URLExt.join(newLocalPath, child.name),
         );
       }
     }
@@ -439,62 +396,146 @@ export class Contents implements IContents {
    *
    * @returns A promise which resolves with the file content model when the file is saved.
    */
-  async save(
-    path: string,
-    options: Partial<ServerContents.IModel> = {}
-  ): Promise<ServerContents.IModel> {
-    let item = await this.get(path);
-    if (!item) {
-      item = await this.newUntitled({ path });
-    }
-    // override with the new values
-    const modified = new Date().toISOString();
-    item = {
-      ...item,
-      ...options,
-      last_modified: modified
-    };
+  async save(path: string, options: Partial<IModel> = {}): Promise<IModel | null> {
+    path = decodeURIComponent(path);
 
     // process the file if coming from an upload
     const ext = PathExt.extname(options.name ?? '');
-    if (options.content && options.format === 'base64') {
-      // TODO: keep base64 if not a text file (image)
-      const content = atob(options.content);
-      const nb = ext === '.ipynb';
-      item = {
-        ...item,
-        content: nb ? JSON.parse(content) : content,
-        format: nb ? 'json' : 'text',
-        type: nb ? 'notebook' : 'file'
-      };
+    const chunk = options.chunk;
+
+    // retrieve the content if it is a later chunk or the last one
+    // the new content will then be appended to the existing one
+    const appendChunk = chunk ? chunk > 1 || chunk === -1 : false;
+    let item: IModel | null = await this.get(path, { content: appendChunk });
+
+    if (!item) {
+      item = await this.newUntitled({ path, ext, type: 'file' });
     }
 
-    await this._storage.setItem(path, item);
+    if (!item) {
+      return null;
+    }
+
+    // keep a reference to the original content
+    const originalContent = item.content;
+
+    const modified = new Date().toISOString();
+    // override with the new values
+    item = {
+      ...item,
+      ...options,
+      last_modified: modified,
+    };
+
+    if (options.content && options.format === 'base64') {
+      const lastChunk = chunk ? chunk === -1 : true;
+
+      const contentBinaryString = this._handleUploadChunk(
+        options.content,
+        originalContent,
+        appendChunk,
+      );
+
+      if (ext === '.ipynb') {
+        const content = lastChunk
+          ? JSON.parse(decoder.decode(this._binaryStringToBytes(contentBinaryString)))
+          : contentBinaryString;
+        item = {
+          ...item,
+          content,
+          format: 'json',
+          type: 'notebook',
+          size: contentBinaryString.length,
+        };
+      } else if (FILE.hasFormat(ext, 'json')) {
+        const content = lastChunk
+          ? JSON.parse(decoder.decode(this._binaryStringToBytes(contentBinaryString)))
+          : contentBinaryString;
+        item = {
+          ...item,
+          content,
+          format: 'json',
+          type: 'file',
+          size: contentBinaryString.length,
+        };
+      } else if (FILE.hasFormat(ext, 'text')) {
+        const content = lastChunk
+          ? decoder.decode(this._binaryStringToBytes(contentBinaryString))
+          : contentBinaryString;
+        item = {
+          ...item,
+          content,
+          format: 'text',
+          type: 'file',
+          size: contentBinaryString.length,
+        };
+      } else {
+        const content = lastChunk ? btoa(contentBinaryString) : contentBinaryString;
+        item = {
+          ...item,
+          content,
+          format: 'base64',
+          type: 'file',
+          size: contentBinaryString.length,
+        };
+      }
+    }
+
+    // fixup content sizes if necessary
+    if (item.content) {
+      switch (options.format) {
+        case 'json': {
+          item = { ...item, size: encoder.encode(JSON.stringify(item.content)).length };
+          break;
+        }
+        case 'text': {
+          item = { ...item, size: encoder.encode(item.content).length };
+          break;
+        }
+        // base64 save was already handled above
+        case 'base64': {
+          break;
+        }
+        default: {
+          item = { ...item, size: 0 };
+          break;
+        }
+      }
+    } else {
+      item = { ...item, size: 0 };
+    }
+
+    await (await this.storage).setItem(path, item);
     return item;
   }
 
   /**
-   * Delete a file.
+   * Delete a file from browser storage.
+   *
+   * Has no effect on server-backed files, which will re-appear with their
+   * original timestamp.
    *
    * @param path - The path to the file.
    */
   async delete(path: string): Promise<void> {
     path = decodeURIComponent(path);
-    const toDelete: string[] = [];
-    // handle deleting directories recursively
-    await this._storage.iterate((item, key) => {
-      if (key === path || key.startsWith(`${path}/`)) {
-        toDelete.push(key);
-      }
-    });
-    await Promise.all(
-      toDelete.map(async p => {
-        return Promise.all([
-          this._storage.removeItem(p),
-          this._checkpoints.removeItem(p)
-        ]);
-      })
+    const slashed = `${path}/`;
+    const toDelete = (await (await this.storage).keys()).filter(
+      (key) => key === path || key.startsWith(slashed),
     );
+    await Promise.all(toDelete.map(this.forgetPath, this));
+  }
+
+  /**
+   * Remove the localForage and checkpoints for a path.
+   *
+   * @param path - The path to the file
+   */
+  protected async forgetPath(path: string): Promise<void> {
+    await Promise.all([
+      (await this.storage).removeItem(path),
+      (await this.checkpoints).removeItem(path),
+    ]);
   }
 
   /**
@@ -506,21 +547,23 @@ export class Contents implements IContents {
    *   checkpoint is created.
    */
   async createCheckpoint(path: string): Promise<ServerContents.ICheckpointModel> {
+    const checkpoints = await this.checkpoints;
+    path = decodeURIComponent(path);
     const item = await this.get(path, { content: true });
-    const copies = (
-      ((await this._checkpoints.getItem(path)) as ServerContents.IModel[]) ?? []
-    ).filter(item => !!item);
+    if (!item) {
+      throw Error(`Could not find file with path ${path}`);
+    }
+    const copies = (((await checkpoints.getItem(path)) as IModel[]) ?? []).filter(
+      Boolean,
+    );
     copies.push(item);
     // keep only a certain amount of checkpoints per file
     if (copies.length > N_CHECKPOINTS) {
       copies.splice(0, copies.length - N_CHECKPOINTS);
     }
-    await this._checkpoints.setItem(path, copies);
+    await checkpoints.setItem(path, copies);
     const id = `${copies.length - 1}`;
-    return {
-      id,
-      last_modified: (item as ServerContents.IModel).last_modified
-    };
+    return { id, last_modified: (item as IModel).last_modified };
   }
 
   /**
@@ -532,16 +575,15 @@ export class Contents implements IContents {
    *    the file.
    */
   async listCheckpoints(path: string): Promise<ServerContents.ICheckpointModel[]> {
-    const copies = ((await this._checkpoints.getItem(path)) ||
-      []) as ServerContents.IModel[];
-    return copies
-      .filter(item => !!item)
-      .map((file, id) => {
-        return {
-          id: id.toString(),
-          last_modified: file.last_modified
-        };
-      });
+    const copies: IModel[] = (await (await this.checkpoints).getItem(path)) || [];
+    return copies.filter(Boolean).map(this.normalizeCheckpoint, this);
+  }
+
+  protected normalizeCheckpoint(
+    model: IModel,
+    id: number,
+  ): ServerContents.ICheckpointModel {
+    return { id: id.toString(), last_modified: model.last_modified };
   }
 
   /**
@@ -553,11 +595,11 @@ export class Contents implements IContents {
    * @returns A promise which resolves when the checkpoint is restored.
    */
   async restoreCheckpoint(path: string, checkpointID: string): Promise<void> {
-    const copies = ((await this._checkpoints.getItem(path)) ||
-      []) as ServerContents.IModel[];
+    path = decodeURIComponent(path);
+    const copies = ((await (await this.checkpoints).getItem(path)) || []) as IModel[];
     const id = parseInt(checkpointID);
     const item = copies[id];
-    await this._storage.setItem(path, item);
+    await (await this.storage).setItem(path, item);
   }
 
   /**
@@ -569,94 +611,216 @@ export class Contents implements IContents {
    * @returns A promise which resolves when the checkpoint is deleted.
    */
   async deleteCheckpoint(path: string, checkpointID: string): Promise<void> {
-    const copies = ((await this._checkpoints.getItem(path)) ||
-      []) as ServerContents.IModel[];
+    path = decodeURIComponent(path);
+    const copies = ((await (await this.checkpoints).getItem(path)) || []) as IModel[];
     const id = parseInt(checkpointID);
     copies.splice(id, 1);
-    await this._checkpoints.setItem(path, copies);
+    await (await this.checkpoints).setItem(path, copies);
   }
 
   /**
-   * Add an `IDrive` to the manager.
+   * Handle an upload chunk for a file.
+   * each chunk is base64 encoded, so we need to decode it and append it to the
+   * original content.
+   * @param newContent the new content to process, base64 encoded
+   * @param originalContent the original content, must be null or a binary string if chunked is true
+   * @param appendChunk whether the chunk should be appended to the originalContent
+   *
+   *
+   * @returns the decoded binary string, appended to the original content if requested
+   * /
    */
-  addDrive(drive: ServerContents.IDrive): void {
-    throw new Error('Method not implemented.');
+  private _handleUploadChunk(
+    newContent: string,
+    originalContent: any,
+    appendChunk: boolean,
+  ): string {
+    const newContentBinaryString = atob(newContent);
+    const contentBinaryString = appendChunk
+      ? originalContent + newContentBinaryString
+      : newContentBinaryString;
+    return contentBinaryString;
   }
 
   /**
-   * Given a path of the form `drive:local/portion/of/it.txt`
-   * get the local part of it.
-   *
-   * @param path: the path.
-   *
-   * @returns The local part of the path.
+   * Convert a binary string to an Uint8Array
+   * @param binaryString the binary string
+   * @returns the bytes of the binary string
    */
-  localPath(path: string): string {
-    throw new Error('Method not implemented.');
+  private _binaryStringToBytes(binaryString: string): Uint8Array {
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
   }
 
   /**
-   * Normalize a global path. Reduces '..' and '.' parts, and removes
-   * leading slashes from the local part of the path, while retaining
-   * the drive name if it exists.
+   * retrieve the contents for this path from the union of local storage and
+   * `api/contents/{path}/all.json`.
    *
-   * @param path: the path.
+   * @param path - The contents path to retrieve
    *
-   * @returns The normalized path.
+   * @returns A promise which resolves with a Map of contents, keyed by local file name
    */
-  normalize(path: string): string {
-    throw new Error('Method not implemented.');
+  private async _getFolder(path: string): Promise<IModel | null> {
+    const content = new Map<string, IModel>();
+    const storage = await this.storage;
+    await storage.iterate<IModel, void>((file, key) => {
+      if (key.includes('/')) {
+        return;
+      }
+      content.set(file.path, file);
+    });
+
+    // layer in contents that don't have local overwrites
+    for (const file of (await this._getServerDirectory(path)).values()) {
+      if (!content.has(file.path)) {
+        content.set(file.path, file);
+      }
+    }
+
+    if (path && content.size === 0) {
+      return null;
+    }
+
+    return {
+      name: '',
+      path,
+      last_modified: new Date(0).toISOString(),
+      created: new Date(0).toISOString(),
+      format: 'json',
+      mimetype: MIME.JSON,
+      content: Array.from(content.values()),
+      size: 0,
+      writable: true,
+      type: 'directory',
+    };
   }
 
   /**
-   * Resolve a global path, starting from the root path. Behaves like
-   * posix-path.resolve, with 3 differences:
-   *  - will never prepend cwd
-   *  - if root has a drive name, the result is prefixed with "<drive>:"
-   *  - before adding drive name, leading slashes are removed
-   *
-   * @param path: the path.
-   *
-   * @returns The normalized path.
+   * Attempt to recover the model from `{:path}/__all__.json` file, fall back to
+   * deriving the model (including content) off the file in `/files/`. Otherwise
+   * return `null`.
    */
-  resolvePath(root: string, path: string): string {
-    throw new Error('Method not implemented.');
+  private async _getServerContents(
+    path: string,
+    options?: ServerContents.IFetchOptions,
+  ): Promise<IModel | null> {
+    const name = PathExt.basename(path);
+    const parentContents = await this._getServerDirectory(URLExt.join(path, '..'));
+    let model = parentContents.get(name);
+    if (!model) {
+      return null;
+    }
+    model = model || {
+      name,
+      path,
+      last_modified: new Date(0).toISOString(),
+      created: new Date(0).toISOString(),
+      format: 'text',
+      mimetype: MIME.PLAIN_TEXT,
+      type: 'file',
+      writable: true,
+      size: 0,
+      content: '',
+    };
+
+    if (options?.content) {
+      if (model.type === 'directory') {
+        const serverContents = await this._getServerDirectory(path);
+        model = { ...model, content: Array.from(serverContents.values()) };
+      } else {
+        const fileUrl = URLExt.join(PageConfig.getBaseUrl(), 'files', path);
+        const response = await fetch(fileUrl);
+        if (!response.ok) {
+          return null;
+        }
+        const mimetype = model.mimetype || response.headers.get('Content-Type');
+        const ext = PathExt.extname(name);
+
+        if (
+          model.type === 'notebook' ||
+          FILE.hasFormat(ext, 'json') ||
+          mimetype?.indexOf('json') !== -1 ||
+          path.match(/\.(ipynb|[^/]*json[^/]*)$/)
+        ) {
+          const contentText = await response.text();
+          model = {
+            ...model,
+            content: JSON.parse(contentText),
+            format: 'json',
+            mimetype: model.mimetype || MIME.JSON,
+            size: encoder.encode(contentText).length,
+          };
+        } else if (FILE.hasFormat(ext, 'text') || mimetype.indexOf('text') !== -1) {
+          const contentText = await response.text();
+          model = {
+            ...model,
+            content: contentText,
+            format: 'text',
+            mimetype: mimetype || MIME.PLAIN_TEXT,
+            size: encoder.encode(contentText).length,
+          };
+        } else {
+          const contentBuffer = await response.arrayBuffer();
+          const contentBytes = new Uint8Array(contentBuffer);
+          model = {
+            ...model,
+            content: btoa(contentBytes.reduce(this.reduceBytesToString, '')),
+            format: 'base64',
+            mimetype: mimetype || MIME.OCTET_STREAM,
+            size: contentBytes.length,
+          };
+        }
+      }
+    }
+
+    return model;
   }
 
   /**
-   * Given a path of the form `drive:local/portion/of/it.txt`
-   * get the name of the drive. If the path is missing
-   * a drive portion, returns an empty string.
-   *
-   * @param path: the path.
-   *
-   * @returns The drive name for the path, or the empty string.
+   * A reducer for turning arbitrary binary into a string
    */
-  driveName(path: string): string {
-    throw new Error('Method not implemented.');
-  }
+  protected reduceBytesToString = (data: string, byte: number): string => {
+    return data + String.fromCharCode(byte);
+  };
 
   /**
-   * Given a path, get a ModelDB.IFactory from the
-   * relevant backend. Returns `null` if the backend
-   * does not provide one.
+   * retrieve the contents for this path from `__index__.json` in the appropriate
+   * folder.
+   *
+   * @param newLocalPath - The new file path.
+   *
+   * @returns A promise which resolves with a Map of contents, keyed by local file name
    */
-  getModelDBFactory(path: string): ModelDB.IFactory | null {
-    throw new Error('Method not implemented.');
-  }
+  private async _getServerDirectory(path: string): Promise<Map<string, IModel>> {
+    const content = this._serverContents.get(path) || new Map();
 
-  /**
-   * Get an encoded download url given a file path.
-   *
-   * @param path - An absolute POSIX file path on the server.
-   *
-   * #### Notes
-   * It is expected that the path contains no relative paths.
-   *
-   * The returned URL may include a query parameter.
-   */
-  getDownloadUrl(path: string): Promise<string> {
-    throw new Error('Method not implemented.');
+    if (!this._serverContents.has(path)) {
+      const apiURL = URLExt.join(
+        PageConfig.getBaseUrl(),
+        'api/contents',
+        path,
+        'all.json',
+      );
+
+      try {
+        const response = await fetch(apiURL);
+        const json = JSON.parse(await response.text());
+        for (const file of json['content'] as IModel[]) {
+          content.set(file.name, file);
+        }
+      } catch (err) {
+        console.warn(
+          `don't worry, about ${err}... nothing's broken. If there had been a
+          file at ${apiURL}, you might see some more files.`,
+        );
+      }
+      this._serverContents.set(path, content);
+    }
+
+    return content;
   }
 
   /**
@@ -666,32 +830,35 @@ export class Contents implements IContents {
    * @param type The file type to increment the counter for.
    */
   private async _incrementCounter(type: ServerContents.ContentType): Promise<number> {
-    const current = ((await this._counters.getItem(type)) as number) ?? -1;
+    const counters = await this.counters;
+    const current = ((await counters.getItem(type)) as number) ?? -1;
     const counter = current + 1;
-    await this._counters.setItem(type, counter);
+    await counters.setItem(type, counter);
     return counter;
   }
 
-  private _isDisposed = false;
-  private _fileChanged = new Signal<this, ServerContents.IChangedArgs>(this);
-  private _storage = localforage.createInstance({
-    name: STORAGE_NAME,
-    description: 'Offline Storage for Notebooks and Files',
-    storeName: 'files',
-    version: 1
-  });
-  private _counters = localforage.createInstance({
-    name: STORAGE_NAME,
-    description: 'Store the current file suffix counters',
-    storeName: 'counters',
-    version: 1
-  });
-  private _checkpoints = localforage.createInstance({
-    name: STORAGE_NAME,
-    description: 'Offline Storage for Checkpoints',
-    storeName: 'checkpoints',
-    version: 1
-  });
+  private _serverContents = new Map<string, Map<string, IModel>>();
+  private _storageName: string = DEFAULT_STORAGE_NAME;
+  private _storageDrivers: string[] | null = null;
+  private _ready: PromiseDelegate<void>;
+  private _storage: LocalForage | undefined;
+  private _counters: LocalForage | undefined;
+  private _checkpoints: LocalForage | undefined;
+  private _localforage: typeof localforage;
+}
+
+/**
+ * A namespace for contents information.
+ */
+export namespace Contents {
+  export interface IOptions {
+    /**
+     * The name of the storage instance on e.g. IndexedDB, localStorage
+     */
+    storageName?: string | null;
+    storageDrivers?: string[] | null;
+    localforage: typeof localforage;
+  }
 }
 
 /**
@@ -703,10 +870,10 @@ namespace Private {
    */
   export const EMPTY_NB: INotebookContent = {
     metadata: {
-      orig_nbformat: 4
+      orig_nbformat: 4,
     },
-    nbformat_minor: 4,
+    nbformat_minor: 5,
     nbformat: 4,
-    cells: []
+    cells: [],
   };
 }

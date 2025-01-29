@@ -20,7 +20,7 @@ const PORT = parseInt(process.env['PORT'] || '5000');
 const PREFIX = process.env['PREFIX'] || '/';
 const ERRORS = { ENOENT: 404 };
 const CUSTOM_ROUTES = {
-  '/favicon.ico': '/lab/favicon.ico'
+  '/favicon.ico': '/lab/favicon.ico',
 };
 
 const MIME_TYPES = {
@@ -169,8 +169,8 @@ const MIME_TYPES = {
   '.ipynb': 'application/json',
   '.jupyterlab-workspace': 'application/json',
 
-  // pyolite
-  '.data': 'application/wasm'
+  // Wasm kernels
+  '.data': 'application/wasm',
 };
 
 function stripSlash(url) {
@@ -218,7 +218,7 @@ async function serve(request, response) {
       new Date().toISOString(),
       code,
       method,
-      url
+      url,
     );
     response.writeHead(code, { 'Content-Type': mime });
     response.end(content, 'utf-8');

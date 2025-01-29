@@ -1,18 +1,28 @@
-import { ObservableMap } from '@jupyterlab/observables';
+import { PageConfig, URLExt } from '@jupyterlab/coreutils';
 
-import { Kernel, KernelMessage } from '@jupyterlab/services';
+import { IObservableMap, ObservableMap } from '@jupyterlab/observables';
+
+import { KernelAPI, Kernel, KernelMessage } from '@jupyterlab/services';
 
 import { deserialize, serialize } from '@jupyterlab/services/lib/kernel/serialize';
 
+import { supportedKernelWebSocketProtocols } from '@jupyterlab/services/lib/kernel/messages';
+
 import { UUID } from '@lumino/coreutils';
 
-import { Server as WebSocketServer, WebSocket } from 'mock-socket';
-
-import { IKernel, IKernels, IKernelSpecs } from './tokens';
+import { ISignal, Signal } from '@lumino/signaling';
 
 import { Mutex } from 'async-mutex';
 
-import { PageConfig } from '@jupyterlab/coreutils';
+import { Server as WebSocketServer, Client as WebSocketClient } from 'mock-socket';
+
+import { IKernel, IKernels, IKernelSpecs } from './tokens';
+
+/**
+ * Use the default kernel wire protocol.
+ */
+const KERNEL_WEBSOCKET_PROTOCOL =
+  supportedKernelWebSocketProtocols.v1KernelWebsocketJupyterOrg;
 
 /**
  * A class to handle requests to /api/kernels
@@ -26,6 +36,17 @@ export class Kernels implements IKernels {
   constructor(options: Kernels.IOptions) {
     const { kernelspecs } = options;
     this._kernelspecs = kernelspecs;
+    // Forward the changed signal from _kernels
+    this._kernels.changed.connect((_, args) => {
+      this._changed.emit(args);
+    });
+  }
+
+  /**
+   * Signal emitted when the kernels map changes
+   */
+  get changed(): ISignal<this, IObservableMap.IChangedArgs<IKernel>> {
+    return this._changed;
   }
 
   /**
@@ -34,7 +55,7 @@ export class Kernels implements IKernels {
    * @param options The kernel start options.
    */
   async startNew(options: Kernels.IKernelOptions): Promise<Kernel.IModel> {
-    const { id, name } = options;
+    const { id, name, location } = options;
 
     const factory = this._kernelspecs.factories.get(name);
     // bail if there is no factory associated with the requested kernel
@@ -47,7 +68,11 @@ export class Kernels implements IKernels {
     const mutex = new Mutex();
 
     // hook a new client to a kernel
-    const hook = (kernelId: string, clientId: string, socket: WebSocket): void => {
+    const hook = (
+      kernelId: string,
+      clientId: string,
+      socket: WebSocketClient,
+    ): void => {
       const kernel = this._kernels.get(kernelId);
 
       if (!kernel) {
@@ -59,6 +84,7 @@ export class Kernels implements IKernels {
 
       const processMsg = async (msg: KernelMessage.IMessage) => {
         await mutex.runExclusive(async () => {
+          await kernel.ready;
           await kernel.handleMessage(msg);
         });
       };
@@ -69,9 +95,11 @@ export class Kernels implements IKernels {
           let msg;
           if (message instanceof ArrayBuffer) {
             message = new Uint8Array(message).buffer;
-            msg = deserialize(message);
+            msg = deserialize(message, KERNEL_WEBSOCKET_PROTOCOL);
           } else if (typeof message === 'string') {
-            msg = deserialize(message);
+            const encoder = new TextEncoder();
+            const encodedData = encoder.encode(message);
+            msg = deserialize(encodedData.buffer, KERNEL_WEBSOCKET_PROTOCOL);
           } else {
             return;
           }
@@ -83,7 +111,7 @@ export class Kernels implements IKernels {
           } else {
             void processMsg(msg);
           }
-        }
+        },
       );
 
       const removeClient = () => {
@@ -92,10 +120,6 @@ export class Kernels implements IKernels {
       };
 
       kernel.disposed.connect(removeClient);
-
-      // TODO: check whether this is called
-      // https://github.com/thoov/mock-socket/issues/298
-      // https://github.com/jupyterlab/jupyterlab/blob/6bc884a7a8ed73c615ce72ba097bdb790482b5bf/packages/services/src/kernel/default.ts#L1245
       socket.onclose = removeClient;
     };
 
@@ -103,12 +127,17 @@ export class Kernels implements IKernels {
     const kernelId = id ?? UUID.uuid4();
 
     // There is one server per kernel which handles multiple clients
-    const kernelUrl = `${Kernels.WS_BASE_URL}api/kernels/${kernelId}/channels`;
+    const kernelUrl = URLExt.join(
+      Kernels.WS_BASE_URL,
+      KernelAPI.KERNEL_SERVICE_URL,
+      encodeURIComponent(kernelId),
+      'channels',
+    );
     const runningKernel = this._kernels.get(kernelId);
     if (runningKernel) {
       return {
         id: runningKernel.id,
-        name: runningKernel.name
+        name: runningKernel.name,
       };
     }
 
@@ -121,11 +150,11 @@ export class Kernels implements IKernels {
         return;
       }
 
-      const message = serialize(msg);
+      const message = serialize(msg, KERNEL_WEBSOCKET_PROTOCOL);
       // process iopub messages
       if (msg.channel === 'iopub') {
         const clients = this._kernelClients.get(kernelId);
-        clients?.forEach(id => {
+        clients?.forEach((id) => {
           this._clients.get(id)?.send(message);
         });
         return;
@@ -136,17 +165,19 @@ export class Kernels implements IKernels {
     const kernel = await factory({
       id: kernelId,
       sendMessage,
-      name
+      name,
+      location,
     });
-
-    await kernel.ready;
 
     this._kernels.set(kernelId, kernel);
     this._kernelClients.set(kernelId, new Set<string>());
 
     // create the websocket server for the kernel
-    const wsServer = new WebSocketServer(kernelUrl);
-    wsServer.on('connection', (socket: WebSocket): void => {
+    const wsServer = new WebSocketServer(kernelUrl, {
+      mock: false,
+      selectProtocol: () => KERNEL_WEBSOCKET_PROTOCOL,
+    });
+    wsServer.on('connection', (socket: WebSocketClient): void => {
       const url = new URL(socket.url);
       const clientId = url.searchParams.get('session_id') ?? '';
       hook(kernelId, clientId, socket);
@@ -154,7 +185,7 @@ export class Kernels implements IKernels {
 
     // clean up closed connection
     wsServer.on('close', (): void => {
-      this._clients.keys().forEach(clientId => {
+      this._clients.keys().forEach((clientId) => {
         const socket = this._clients.get(clientId);
         if (socket?.readyState === WebSocket.CLOSED) {
           this._clients.delete(clientId);
@@ -172,7 +203,7 @@ export class Kernels implements IKernels {
 
     return {
       id: kernel.id,
-      name: kernel.name
+      name: kernel.name,
     };
   }
 
@@ -186,9 +217,19 @@ export class Kernels implements IKernels {
     if (!kernel) {
       throw Error(`Kernel ${kernelId} does not exist`);
     }
-    const { id, name } = kernel;
+    const { id, name, location } = kernel;
     kernel.dispose();
-    return this.startNew({ id, name });
+    return this.startNew({ id, name, location });
+  }
+
+  /**
+   * List the running kernels.
+   */
+  async list(): Promise<Kernel.IModel[]> {
+    return [...this._kernels.values()].map((kernel) => ({
+      id: kernel.id,
+      name: kernel.name,
+    }));
   }
 
   /**
@@ -200,10 +241,18 @@ export class Kernels implements IKernels {
     this._kernels.delete(id)?.dispose();
   }
 
+  /**
+   * Get a kernel by id
+   */
+  async get(id: string): Promise<IKernel | undefined> {
+    return this._kernels.get(id);
+  }
+
   private _kernels = new ObservableMap<IKernel>();
-  private _clients = new ObservableMap<WebSocket>();
+  private _clients = new ObservableMap<WebSocketClient>();
   private _kernelClients = new ObservableMap<Set<string>>();
   private _kernelspecs: IKernelSpecs;
+  private _changed = new Signal<this, IObservableMap.IChangedArgs<IKernel>>(this);
 }
 
 /**
@@ -233,6 +282,11 @@ export namespace Kernels {
      * The kernel name.
      */
     name: string;
+
+    /**
+     * The location in the virtual filesystem from which the kernel was started.
+     */
+    location: string;
   }
 
   /**

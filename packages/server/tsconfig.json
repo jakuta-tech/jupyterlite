@@ -13,10 +13,19 @@
       "path": "../kernel"
     },
     {
+      "path": "../licenses"
+    },
+    {
+      "path": "../localforage"
+    },
+    {
       "path": "../session"
     },
     {
       "path": "../settings"
+    },
+    {
+      "path": "../translation"
     }
   ]
 }

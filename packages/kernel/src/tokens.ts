@@ -1,8 +1,17 @@
+// Copyright (c) Jupyter Development Team.
+// Distributed under the terms of the Modified BSD License.
+
+import type { Remote } from 'comlink';
+
+import { IObservableMap } from '@jupyterlab/observables';
+
 import { Kernel, KernelMessage, KernelSpec } from '@jupyterlab/services';
 
 import { Token } from '@lumino/coreutils';
 
 import { IObservableDisposable } from '@lumino/disposable';
+
+import { ISignal } from '@lumino/signaling';
 
 import { Kernels } from './kernels';
 
@@ -14,9 +23,19 @@ import { KernelSpecs } from './kernelspecs';
 export const IKernels = new Token<IKernels>('@jupyterlite/kernel:IKernels');
 
 /**
+ * The kernel name of last resort.
+ */
+export const FALLBACK_KERNEL = 'javascript';
+
+/**
  * An interface for the Kernels service.
  */
 export interface IKernels {
+  /**
+   * Signal emitted when the kernels map changes
+   */
+  readonly changed: ISignal<IKernels, IObservableMap.IChangedArgs<IKernel>>;
+
   /**
    * Start a new kernel.
    *
@@ -32,11 +51,24 @@ export interface IKernels {
   restart: (id: string) => Promise<Kernel.IModel>;
 
   /**
+   * List the running kernels.
+   */
+  list: () => Promise<Kernel.IModel[]>;
+
+  /**
    * Shut down a kernel.
    *
    * @param id The kernel id.
    */
   shutdown: (id: string) => Promise<void>;
+
+  /**
+   * Get a kernel by id
+   *
+   * @param id The kernel id.
+   * @returns the kernel if it exists, undefined otherwise.
+   */
+  get(id: string): Promise<IKernel | undefined>;
 }
 
 /**
@@ -54,6 +86,11 @@ export interface IKernel extends IObservableDisposable {
   readonly name: string;
 
   /**
+   * The location in the virtual filesystem from which the kernel was started.
+   */
+  readonly location: string;
+
+  /**
    * A promise that is fulfilled when the kernel is ready.
    */
   readonly ready: Promise<void>;
@@ -64,71 +101,6 @@ export interface IKernel extends IObservableDisposable {
    * @param msg The message to handle
    */
   handleMessage(msg: KernelMessage.IMessage): Promise<void>;
-
-  /**
-   * Handle a `kernel_info_request` message.
-   *
-   * @returns A promise that resolves with the kernel info.
-   */
-  kernelInfoRequest(): Promise<KernelMessage.IInfoReplyMsg['content']>;
-
-  /**
-   * Handle an `execute_request` message.
-   *
-   * @param content - The content of the execute_request kernel message
-   */
-  executeRequest(
-    content: KernelMessage.IExecuteRequestMsg['content']
-  ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
-
-  /**
-   * Handle a `complete_request` message.
-   *
-   * @param content - The content of the request.
-   */
-  completeRequest(
-    content: KernelMessage.ICompleteRequestMsg['content']
-  ): Promise<KernelMessage.ICompleteReplyMsg['content']>;
-
-  /**
-   * Handle an `inspect_request` message.
-   *
-   * @param content - The content of the request.
-   *
-   * @returns A promise that resolves with the response message.
-   */
-  inspectRequest(
-    content: KernelMessage.IInspectRequestMsg['content']
-  ): Promise<KernelMessage.IInspectReplyMsg['content']>;
-
-  /**
-   * Handle an `is_complete_request` message.
-   *
-   * @param content - The content of the request.
-   *
-   * @returns A promise that resolves with the response message.
-   */
-  isCompleteRequest(
-    content: KernelMessage.IIsCompleteRequestMsg['content']
-  ): Promise<KernelMessage.IIsCompleteReplyMsg['content']>;
-
-  /**
-   * Handle a `comm_info_request` message.
-   *
-   * @param content - The content of the request.
-   *
-   * @returns A promise that resolves with the response message.
-   */
-  commInfoRequest(
-    content: KernelMessage.ICommInfoRequestMsg['content']
-  ): Promise<KernelMessage.ICommInfoReplyMsg['content']>;
-
-  /**
-   * Send an `input_reply` message.
-   *
-   * @param content - The content of the reply.
-   */
-  inputReply(content: KernelMessage.IInputReplyMsg['content']): void;
 }
 
 /**
@@ -155,6 +127,11 @@ export namespace IKernel {
     name: string;
 
     /**
+     * The location in the virtual filesystem from which the kernel was started.
+     */
+    location: string;
+
+    /**
      * The method to send messages back to the server.
      */
     sendMessage: SendMessage;
@@ -164,9 +141,7 @@ export namespace IKernel {
 /**
  * The token for the kernel spec service.
  */
-export const IKernelSpecs = new Token<IKernelSpecs>(
-  '@jupyterlite/kernelspec:IKernelSpecs'
-);
+export const IKernelSpecs = new Token<IKernelSpecs>('@jupyterlite/kernel:IKernelSpecs');
 
 /**
  * The interface for the kernel specs service.
@@ -176,6 +151,11 @@ export interface IKernelSpecs {
    * Get the kernel specs.
    */
   readonly specs: KernelSpec.ISpecModels | null;
+
+  /**
+   * Get the default kernel name.
+   */
+  readonly defaultKernelName: string;
 
   /**
    * Get the kernel factories for the current kernels.
@@ -189,3 +169,57 @@ export interface IKernelSpecs {
    */
   register: (options: KernelSpecs.IKernelOptions) => void;
 }
+
+/**
+ * An interface for a comlink-based worker kernel
+ */
+export interface IWorkerKernel {
+  /**
+   * Handle any lazy setup activities.
+   */
+  initialize(options: IWorkerKernel.IOptions): Promise<void>;
+  execute(
+    content: KernelMessage.IExecuteRequestMsg['content'],
+    parent: any,
+  ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
+  complete(
+    content: KernelMessage.ICompleteRequestMsg['content'],
+    parent: any,
+  ): Promise<KernelMessage.ICompleteReplyMsg['content']>;
+  inspect(
+    content: KernelMessage.IInspectRequestMsg['content'],
+    parent: any,
+  ): Promise<KernelMessage.IInspectReplyMsg['content']>;
+  isComplete(
+    content: KernelMessage.IIsCompleteRequestMsg['content'],
+    parent: any,
+  ): Promise<KernelMessage.IIsCompleteReplyMsg['content']>;
+  commInfo(
+    content: KernelMessage.ICommInfoRequestMsg['content'],
+    parent: any,
+  ): Promise<KernelMessage.ICommInfoReplyMsg['content']>;
+  commOpen(content: KernelMessage.ICommOpenMsg, parent: any): Promise<void>;
+  commMsg(content: KernelMessage.ICommMsgMsg, parent: any): Promise<void>;
+  commClose(content: KernelMessage.ICommCloseMsg, parent: any): Promise<void>;
+  inputReply(
+    content: KernelMessage.IInputReplyMsg['content'],
+    parent: any,
+  ): Promise<void>;
+}
+
+/**
+ * A namespace for worker kernels.
+ **/
+export namespace IWorkerKernel {
+  /**
+   * Common values likely to be required by all kernels.
+   */
+  export interface IOptions {
+    /**
+     * The base URL of the kernel server.
+     */
+    baseUrl: string;
+  }
+}
+
+export interface IRemoteKernel extends Remote<IWorkerKernel> {}

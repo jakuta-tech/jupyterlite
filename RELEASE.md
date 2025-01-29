@@ -1,70 +1,34 @@
 # Releasing JupyterLite
 
-The current release process is still a bit manual, but should hopefully improve and be
-more automated soon.
+## Automated Releases with `jupyter_releaser`
 
-## Getting a clean environment
+The recommended way to make a release is to use
+[`jupyter_releaser`](https://jupyter-releaser.readthedocs.io/en/latest/get_started/making_release_from_repo.html).
 
-To get a clean environment, the simplest is to follow the documentation for
-contributing: https://jupyterlite.readthedocs.io/en/latest/contributing.html
+### Specifying a version spec
 
-Alternatively, a local repository can be cleaned with:
+The `next` version spec is supported and will bump the packages as follows. For example:
 
-```bash
-git clean -fdx
-```
+- `0.1.0a0` -> `0.1.0a1`
+- `0.1.0b7` -> `0.1.0b8`
+- `0.1.0` -> `0.1.1`
 
-## Update the Changelog
+_The `next` version spec is automatically applied when using the releaser_.
 
-We use [`github-activity`](https://github.com/executablebooks/github-activity) to
-generate the Changelog based on GitHub labels.
+To bump to another version, you can specify the Python version directly. For example:
 
-This can be generated locally by running `github-activity` locally.
+- `0.1.0b8`
+- `0.1.1`
+- `1.2.0rc0`
 
-Or using the _Draft Changelog_ GitHub Actions workflow from the Jupyter Releaser to
-handle that automatically:
-https://github.com/jupyter-server/jupyter_releaser#typical-workflow
+## Release assets
 
-## Update the version
+JupyterLite is published to:
 
-To update the version:
+- PyPI: https://pypi.org/project/jupyterlite/
+- npm: https://www.npmjs.com/package/@jupyterlite/server
 
-1. JS packages: `yarn update:dependency --regex @jupyterlite <new-version-spec`
-2. Python packages with the search / replace on the Python releated files
+Release assets are also available on GitHub. For example for
+[`0.1.0a12`](https://github.com/jupyterlite/jupyterlite/releases/tag/v0.1.0a12):
 
-Here is an example commit that bumps the versions:
-https://github.com/jupyterlite/jupyterlite/commit/99dcbe7e445901bd09b34b7f0a19ca13af37312a
-
-TBD: streamline the bump version process and sync between Python and JS packages.
-
-## Commiting and tagging
-
-```bash
-git add .
-git commit -m "Release x.y.z"
-git tag x.y.z
-git push upstream main --tags
-```
-
-When the new tag is pushed, a GitHub Actions workflow will create the new draft GitHub
-Release.
-
-Go to the draft release, paste the new changelog entry, and press Publish.
-
-## Releasing on PyPI
-
-To release the `jupyterlite` command line tool on PyPI, download the Python assets from
-the GitHub Release (previous step). Then:
-
-```bash
-cd path-to-assets/
-twine upload *
-```
-
-## Releasing on conda forge
-
-TBD
-
-## Releasing on npm
-
-TBD
+![release-assets](https://user-images.githubusercontent.com/591645/136523208-5b33d111-c668-4bc1-935f-2cafd929422a.png)
