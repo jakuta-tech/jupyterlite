@@ -10,6 +10,9 @@
   "extends": "./tsconfigbase",
   "references": [
     {
+      "path": "./packages/application"
+    },
+    {
       "path": "./packages/application-extension"
     },
     {
@@ -19,28 +22,19 @@
       "path": "./packages/iframe-extension"
     },
     {
-      "path": "./packages/javascript-kernel"
-    },
-    {
-      "path": "./packages/javascript-kernel-extension"
-    },
-    {
       "path": "./packages/kernel"
     },
     {
-      "path": "./packages/p5-kernel"
+      "path": "./packages/licenses"
     },
     {
-      "path": "./packages/p5-kernel-extension"
+      "path": "./packages/localforage"
     },
     {
-      "path": "./packages/pyolite-kernel"
+      "path": "./packages/notebook-application-extension"
     },
     {
-      "path": "./packages/pyolite-kernel-extension"
-    },
-    {
-      "path": "./packages/retro-application-extension"
+      "path": "./packages/repl-extension"
     },
     {
       "path": "./packages/server"
@@ -53,6 +47,12 @@
     },
     {
       "path": "./packages/settings"
+    },
+    {
+      "path": "./packages/translation"
+    },
+    {
+      "path": "./packages/types"
     },
     {
       "path": "./packages/ui-components"

@@ -1,5 +1,7 @@
 import { Session } from '@jupyterlab/services';
 
+import { PathExt } from '@jupyterlab/coreutils';
+
 import { IKernels } from '@jupyterlite/kernel';
 
 import { ArrayExt } from '@lumino/algorithm';
@@ -19,6 +21,41 @@ export class Sessions implements ISessions {
    */
   constructor(options: Sessions.IOptions) {
     this._kernels = options.kernels;
+    // Listen for kernel removals
+    this._kernels.changed.connect((_, args) => {
+      switch (args.type) {
+        case 'remove': {
+          const kernelId = args.oldValue?.id;
+          if (!kernelId) {
+            return;
+          }
+          // find the session associated with the kernel
+          const session = this._sessions.find((s) => s.kernel?.id === kernelId);
+          if (!session) {
+            return;
+          }
+          // Track the kernel ID for restart detection
+          this._pendingRestarts.add(kernelId);
+          setTimeout(async () => {
+            // If after a short delay the kernel hasn't been re-added, it was terminated
+            if (this._pendingRestarts.has(kernelId)) {
+              this._pendingRestarts.delete(kernelId);
+              await this.shutdown(session.id);
+            }
+          }, 100);
+          break;
+        }
+        case 'add': {
+          // If this was a restart, remove it from pending
+          const kernelId = args.newValue?.id;
+          if (!kernelId) {
+            return;
+          }
+          this._pendingRestarts.delete(kernelId);
+          break;
+        }
+      }
+    });
   }
 
   /**
@@ -27,7 +64,7 @@ export class Sessions implements ISessions {
    * @param id The id of the session.
    */
   async get(id: string): Promise<Session.IModel> {
-    const session = this._sessions.find(s => s.id === id);
+    const session = this._sessions.find((s) => s.id === id);
     if (!session) {
       throw Error(`Session ${id} not found`);
     }
@@ -42,15 +79,17 @@ export class Sessions implements ISessions {
   }
 
   /**
-   * Path an existing session.
+   * Patch an existing session.
    * This can be used to rename a session.
-   * TODO: read path and name
+   *
+   * - path updates session to track renamed paths
+   * - kernel.name starts a new kernel with a given kernelspec
    *
    * @param options The options to patch the session.
    */
   async patch(options: Session.IModel): Promise<Session.IModel> {
-    const { id, path, name } = options;
-    const index = this._sessions.findIndex(s => s.id === id);
+    const { id, path, name, kernel } = options;
+    const index = this._sessions.findIndex((s) => s.id === id);
     const session = this._sessions[index];
     if (!session) {
       throw Error(`Session ${id} not found`);
@@ -58,8 +97,37 @@ export class Sessions implements ISessions {
     const patched = {
       ...session,
       path: path ?? session.path,
-      name: name ?? session.name
+      name: name ?? session.name,
     };
+
+    if (kernel) {
+      // Kernel id takes precedence over name.
+      if (kernel.id) {
+        const session = this._sessions.find(
+          (session) => session.kernel?.id === kernel?.id,
+        );
+        if (session) {
+          patched.kernel = session.kernel;
+        }
+      } else if (kernel.name) {
+        const newKernel = await this._kernels.startNew({
+          id: UUID.uuid4(),
+          name: kernel.name,
+          location: PathExt.dirname(patched.path),
+        });
+
+        if (newKernel) {
+          patched.kernel = newKernel;
+        }
+
+        // clean up the session on kernel shutdown
+        void this._handleKernelShutdown({
+          kernelId: newKernel.id,
+          sessionId: session.id,
+        });
+      }
+    }
+
     this._sessions[index] = patched;
     return patched;
   }
@@ -72,13 +140,23 @@ export class Sessions implements ISessions {
    */
   async startNew(options: Session.IModel): Promise<Session.IModel> {
     const { path, name } = options;
-    const running = this._sessions.find(s => s.name === name);
+    const running = this._sessions.find((s) => s.name === name);
     if (running) {
       return running;
     }
     const kernelName = options.kernel?.name ?? '';
     const id = options.id ?? UUID.uuid4();
-    const kernel = await this._kernels.startNew({ id, name: kernelName });
+    const nameOrPath = options.name ?? options.path;
+    const dirname = PathExt.dirname(options.name) || PathExt.dirname(options.path);
+    const hasDrive = nameOrPath.includes(':');
+    const driveName = hasDrive ? nameOrPath.split(':')[0] : '';
+    // add drive name if missing (top level directory)
+    const location = dirname.includes(driveName) ? dirname : `${driveName}:${dirname}`;
+    const kernel = await this._kernels.startNew({
+      id,
+      name: kernelName,
+      location,
+    });
     const session: Session.IModel = {
       id,
       path,
@@ -86,10 +164,14 @@ export class Sessions implements ISessions {
       type: 'notebook',
       kernel: {
         id: kernel.id,
-        name: kernel.name
-      }
+        name: kernel.name,
+      },
     };
     this._sessions.push(session);
+
+    // clean up the session on kernel shutdown
+    void this._handleKernelShutdown({ kernelId: id, sessionId: session.id });
+
     return session;
   }
 
@@ -99,7 +181,7 @@ export class Sessions implements ISessions {
    * @param id The id of the session to shut down.
    */
   async shutdown(id: string): Promise<void> {
-    const session = this._sessions.find(s => s.id === id);
+    const session = this._sessions.find((s) => s.id === id);
     if (!session) {
       throw Error(`Session ${id} not found`);
     }
@@ -110,9 +192,22 @@ export class Sessions implements ISessions {
     ArrayExt.removeFirstOf(this._sessions, session);
   }
 
+  /**
+   * Handle kernel shutdown
+   */
+  private async _handleKernelShutdown({
+    kernelId,
+    sessionId,
+  }: {
+    kernelId: string;
+    sessionId: string;
+  }): Promise<void> {
+    // No need to handle kernel shutdown here anymore since we're using the changed signal
+  }
+
   private _kernels: IKernels;
-  // TODO: offload to a database
   private _sessions: Session.IModel[] = [];
+  private _pendingRestarts = new Set<string>();
 }
 
 /**

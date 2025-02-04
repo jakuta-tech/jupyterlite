@@ -3,6 +3,8 @@ lint-staged.config.js
 scripts/serve.js
 
 .yarn-packages
+.yarn
+.pnp*
 node_modules
 **/build
 **/lib
@@ -16,7 +18,7 @@ coverage
 *.map.js
 *.bundle.js
 docs/_build
-app/lab/extensions/
+app/extensions/
 
 # jetbrains IDE stuff
 .idea/

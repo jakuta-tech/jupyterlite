@@ -2,72 +2,89 @@ name: jupyterlite-dev
 # this is a conda/mamba environment for working on JupyterLite and upstreams
 
 channels:
-  - conda-forge/label/jupyterlab_rc
   - conda-forge
+  - conda-forge/label/jupyterlab_alpha
+  - conda-forge/label/notebook_alpha
 
 dependencies:
   # build stuff
-  - black
-  - flit >=3.1
-  - isort
-  - pyflakes
-  - twine
+  - depfinder
+  - nbstripout
+  - ruff =0.8.3
   # demo stuff
+  - ipywidgets >=8.0.4,<9
   - jupyter-server-proxy
-  - jupyterlab >=3.1.9,<4
-  - retrolab
   # extra docs tools
   - sphinx-autobuild
+  # avoid 200mb mkl
+  - nomkl
 
   # the chunk below populates `../examples/jupyter_lite_config.json`,
   # rewriting `anaconda.org` links to `conda-forge`'s GitHub releases
   ### FEDERATED EXTENSIONS ###
-  - jupyterlab_miami_nights
-  - jupyterlab_widgets >=1,<2
-  - jupyterlab-drawio
+  - ipycytoscape
+  - jupyterlab_miami_nights >=0.4.0
+  - jupyterlab_widgets >=3.0.4,<4.0.0
   - jupyterlab-fasta >=3,<4
   - jupyterlab-geojson >=3,<4
-  - jupyterlab-kernelspy
-  - jupyterlab-tour >=3.1.0
-  - theme-darcula >=3,<4
+  - jupyterlab-kernelspy >=4.0.0
+  - jupyterlab-tour >=4.0.1
+  # TODO: re-add after JupyterLab 4 compatibility
+  # https://github.com/jupyterlite/jupyterlab-webrtc-docprovider/issues/16
+  # - jupyterlab-webrtc-docprovider >=0.1.1
+  - jupyterlab-night
+  - jupyterlite-pyodide-kernel >=0.5.1
   # if a package is pinned with == `doit check` will ensure the version is pinned
   # in `docs/_build/_static/files/*.ipynb`
-  - bqplot ==0.12.30
-  - ipycanvas ==0.9.0
-  - ipycytoscape ==1.2.2
-  - ipyleaflet ==0.14.0
-  - ipympl ==0.7.0
-  - ipyvuetify ==1.8.1
-  - plotly ==5.1.0
+  - bqplot
+  - ipycanvas
+  - ipyleaflet
+  - ipympl
+  - ipyvue
+  - ipyvuetify
+  - plotly >=5.12.0
   ### FEDERATED EXTENSIONS ###
 
   # the chunk below gets copied from `../docs/environment.yml` by `doit env`
   ### DOCS ENV ###
   # runtimes
-  - nodejs >=14,<15
-  - python >=3.9,<3.10
+  - nodejs >=20,<21
+  - python >=3.12,<3.13
   # build
-  - doit >=0.33,<0.34
-  - flit >=3.1
-  - pip
-  - wheel
+  - doit >=0.34,<1
+  - hatch >=1.6.3,<2
+  - importlib_metadata
   - jsonschema >=3
-  - yarn <2
+  - jupyterlab >=4.4.0a3,<4.5
+  - notebook >=7.4.0a2,<7.5
+  - pip
+  - pkginfo
+  - python-libarchive-c
+  - requests_cache
+  - twine >=5.1.1
+  - wheel
   # cli
   - wheel
   # docs
-  - myst-nb
+  - docutils >=0.18
+  - myst-nb >=1
   - pydata-sphinx-theme
-  - sphinx
+  - sphinx >=5.1,<6
   - sphinx-autodoc-typehints
   - sphinx-jsonschema
+  - sphinxcontrib-mermaid
   - sphinxext-rediraffe
   # check
   - pytest-check-links
   # test
   - ansi2html
-  - pytest-console-scripts
+  - pytest-console-scripts >=1.4.0
   - pytest-cov
   - pytest-html
   - pytest-xdist
+  # language packs and contents
+  - jupyter_server >=1.11,<3
+  - jupyterlab-language-pack-fr-FR
+  - jupyterlab-language-pack-zh-CN
+  - jupyterlab_server >=2.27.1,<3
   ### DOCS ENV ###

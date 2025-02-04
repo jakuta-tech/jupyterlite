@@ -8,6 +8,11 @@ import { JSONObject, PartialJSONObject, Token } from '@lumino/coreutils';
 export const ISettings = new Token<ISettings>('@jupyterlite/settings:ISettings');
 
 /**
+ * The settings file to request
+ */
+export type SettingsFile = 'all.json' | 'all_federated.json';
+
+/**
  * An interface for the plugin settings.
  */
 export interface IPlugin extends PartialJSONObject {
@@ -42,6 +47,11 @@ export interface IPlugin extends PartialJSONObject {
  */
 export interface ISettings {
   /**
+   * A promise that resolves after the settings have been full initialized
+   */
+  ready: Promise<void>;
+
+  /**
    * Get settings by plugin id
    *
    * @param pluginId the id of the plugin
@@ -62,28 +72,4 @@ export interface ISettings {
    *
    */
   save(pluginId: string, raw: string): Promise<void>;
-}
-
-/**
- * The interface for a federated extension, as it appears in `jupyter-config-data`
- *
- * TODO: sync with schema, Lab core, etc.
- */
-export interface IFederatedExtension {
-  /**
-   * The npm-compatible name of the package
-   */
-  name: string;
-  /**
-   * The relative path to the extension
-   */
-  extension: string;
-  /**
-   * The relative entrypoint to the WebPack remoteEntry
-   */
-  load: string;
-  /**
-   * Optional path to the style module
-   */
-  style?: string;
 }

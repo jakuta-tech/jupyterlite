@@ -20,9 +20,9 @@ git clone https://github.com/jupyterlite/jupyterlite
 You'll need:
 
 - `git`
-- `nodejs >=12`
-- `yarn <2`
-- `python >=3.8`
+- `nodejs >=20,<21`
+- `jupyterlab >=4.4.0a3,<4.5`
+- `python >=3.12,<3.13`
 
 Various package managers on different operating systems provide these.
 
@@ -33,8 +33,14 @@ Various package managers on different operating systems provide these.
 > mamba env update --file .binder/environment.yml
 > mamba activate jupyterlite-dev
 > ```
+>
+> To get full archive reproducibility test output, only available on Linux, also run:
+>
+> ```bash
+> mamba install -c conda-forge diffoscope
+> ```
 
-For speed, in GitHub Actions, `python` and `nodejs` are installed directly. Provided you
+For speed in GitHub Actions, `python` and `nodejs` are installed directly. Provided you
 already have these, to install the full development stack:
 
 ```bash
@@ -57,43 +63,49 @@ To see all of the _tasks_ available, use the `list` action:
 doit list --all --status
 ```
 
-To get information about a specific _task_, use the info `info` _action_ with the _task_
-name from the first column of `list`:
-
-```bash
-doit info build:js:app:retro
-```
-
 #### Task and Action Defaults
 
 The default `doit` _action_ is `run` which... runs the named _tasks_.
 
-The default tasks are `lint`, `build` and `docs:app:build`, so the following are
-equivalent:
+The default tasks are `build` and `docs:app:build`, so the following are equivalent:
 
 ```bash
 doit
-doit lint build docs:app:build
-doit run lint build docs:app:build
+doit build docs:app:build
+doit run build docs:app:build
 ```
 
-#### `doit auto`
+```{note}
+For reference the default `doit` tasks are defined in the `DOIT_CONFIG` variable in the [dodo.py][dodo] file.
+```
 
-On Linux and MacOS, `doit auto` (which can also accept task names) will watch all files
-and perform any dependent tasks, then reload the tasks, useful for rapidly seeing
-changes.
+#### `doit serve`
 
-> By default, `auto` will invoke `doit lint` which may change source files. This can be
-> confusing to IDEs (or the `watch:docs` and `watch:js` tasks) that might be performing
-> their own watching, or run up against file system limits.
+A number of development servers can be started for interactive local development and
+documentation authoring.
+
+These offer different assets and tools, and obey different environment variables:
+
+- `5000`: core assets from `./app`:
+  - `doit serve:core:js`
+  - `doit serve:core:py`
+- `8000`: example site `./build/docs-app` on :
+  - `doit serve:docs:app`
+    - `LITE_ARGS` (a JSON list of strings) controls CLI arguments to `jupyter lite`
+- `8888`: JupyterLab
+  - `doit serve:lab`
+    - `LAB_ARGS` (a JSON list of strings) controls CLI arguments to `jupyter lab`
 
 ### Core JavaScript development
 
 The JupyterLite core JS development workflow builds:
 
-- a ready-to-serve, empty website with:
-  - a `lab/index.html` and supporting assets
-  - a `retro/*/index.html` and supporting assets (for `tree`, `editor`, etc.)
+- multiple apps for each of the `notebook`, `lab`, and `repl` frontends
+  - the entrypoint for each app is located under `{appName}/index.html`. For example:
+    - `lab/index.html`: opens the JupyterLab interface
+    - `notebooks/index.html?path=example.ipynb`: opens the notebook interface with the
+      `example.ipynb` notebook
+    - `tree/index.html`: opens the file browser via the Jupyter Notebook interface
   - common configuration tools
 - `typedoc` documentation
 - > _TBD: a set of component tarballs distributed on `npmjs.com`. See [#7]._
@@ -116,13 +128,13 @@ While most of the scripts below will be run (in the correct order based on chang
 Most of the [development tasks](#development-tasks) can be run with one command:
 
 ```bash
-yarn bootstrap
+jlpm bootstrap
 ```
 
 #### Install JavaScript Dependencies
 
 ```bash
-yarn
+jlpm
 ```
 
 #### Build Apps
@@ -130,13 +142,13 @@ yarn
 To build development assets:
 
 ```bash
-yarn build
+jlpm build
 ```
 
 To build production assets:
 
 ```bash
-yarn build:prod
+jlpm build:prod
 ```
 
 #### Serve Apps
@@ -148,7 +160,7 @@ To serve with `scripts/serve.js`, based on Node.js's
 [`http`](https://nodejs.org/api/http.html) module:
 
 ```bash
-yarn serve
+jlpm serve
 ```
 
 To serve with Python's built-in
@@ -156,42 +168,140 @@ To serve with Python's built-in
 Python 3.7+):
 
 ```bash
-yarn serve:py
+jlpm serve:py
 ```
 
 #### Watch Sources
 
 ```bash
-yarn watch
+jlpm watch
 ```
 
 #### Lint/Format Sources
 
 ```bash
-yarn lint
+jlpm lint
 ```
 
 #### Run Unit Tests
 
 ```bash
-yarn build:test
-yarn test
+jlpm build:test
+jlpm test
 ```
 
-### Lab Extension development
+#### Installing other kernels
 
-> _TBD: describe how the `@jupyterlite/labextension` works with e.g. **real**
-> serverextensions_
+By default this repository only includes the JavaScript kernel.
 
-### (Browser) Python Development
+If you would like to setup a local environment with an additional, you can install
+explicitely, before running the `jupyter lite build` command. For example:
 
-> _TBD: describe successor to `pyolite`, patches, etc. See [#151]._
+- To install the Pyodide kernel: `pip install jupyterlite-pyodide-kernel`
+- To install the Xeus Python kernel:
+  https://jupyterlite-xeus.readthedocs.io/en/latest/environment.html
 
-[#151]: https://github.com/jupyterlite/jupyterlite/issues/151
+### UI Tests
+
+`jupyterlite` uses the
+[Galata](https://github.com/jupyterlab/jupyterlab/tree/master/galata) framework for end
+to end and visual regression testing. Galata is build on top of
+[Playwright](https://playwright.dev) provides a high level API to programmatically
+interact with the JupyterLab UI, and tools for taking screenshots and generating test
+reports.
+
+#### Running the UI Tests locally
+
+First install the dependencies:
+
+```sh
+cd ui-tests
+jlpm install
+```
+
+The UI tests use a custom JupyterLite website:
+
+```sh
+# in ui-tests directory
+
+# build
+jlpm build
+```
+
+Then run the `test` script:
+
+```sh
+# in the ui-tests directory
+jlpm test
+```
+
+You can pass additional arguments to `playwright` by appending parameters to the
+command. For example to run the test in headed mode, `jlpm test --headed`.
+
+Checkout the [Playwright Command Line Reference](https://playwright.dev/docs/test-cli/)
+for more information about the available command line options.
+
+#### Adding new UI tests
+
+New test suites can be added to the `ui-tests/tests` directory. You can see some
+additional example test suites in the
+[JupyterLab repo](https://github.com/jupyterlab/jupyterlab/blob/master/galata/test). If
+the tests in new suites are doing visual regression tests or HTML source regression
+tests then you also need to add their reference images to the `-snapshots` directories.
+
+#### Reference Image Captures
+
+When adding a new visual regression test, first make sure your tests pass locally on
+your development environment, with a reference snapshots generated in your dev
+environment. You can generate new reference snapshots by running the following command:
+
+```bash
+jlpm test:update
+```
+
+To update the snapshots:
+
+- push the new changes to the branch
+- wait for the CI check to complete
+- go to the artifacts section and download the `jupyterlite-chromium-updated-snapshots`
+  and `jupyterlite-firefox-updated-snapshots` archives
+- extract the archives
+- copy the `-snapshots` directories to replace the existing ones
+- commit and push the changes
+
+Alternatively, you can also post a comment on the PR with the following content:
+
+```
+bot please update playwright snapshots
+```
+
+The bot should react to the comment by leaving a 👍 reaction, and trigger the snapshot
+update in a background GitHub Action run.
+
+The generated snapshots can be found on the Summary page of the CI check:
+
+![reference-snapshots](https://user-images.githubusercontent.com/591645/141300086-d13c3221-a66d-45f5-b0ac-6f4795b16349.png)
+
+#### Troubleshooting UI tests
+
+The UI tests have the Playwright `trace` option enabled which is useful to have a more
+in-depth look at failing tests on CI, including console errors and network calls.
+
+To view the trace:
+
+1. download the Playwright report from the GitHub Actions artifacts
+2. start a web server (for example with `python -m http.server`) and open the report in
+   a browser
+3. navigate to the failing test
+4. scroll to the "Trace" section of the test to open the trace in a new tab
+
+![a screenshot showing the Playwright trace](https://github.com/jupyterlite/jupyterlite/assets/591645/76485f0e-0bc8-4d8e-9584-7e5f185c96cd)
+
+For more information: https://playwright.dev/docs/trace-viewer
 
 ### (Server) Python Development
 
-After all the `yarn`-related work has finished, the terminal-compatible python uses the
+After all the `jlpm`-related work has finished, the terminal-compatible python uses the
 `npm`-compatible tarball of `app` to build new sites combined with **original user
 content**.
 
@@ -200,7 +310,7 @@ content**.
 Extra `PYTEST_ARGS` can be passed as a (gross) JSON string:
 
 ```bash
-PYTEST_ARGS='["-s", "-x", "--ff"]' doit test:py:jupyterlite
+PYTEST_ARGS='["-s", "-x", "--ff"]' doit test:py:jupyterlite-core
 ```
 
 Several tasks invoke the `jupyter lite` CLI, which is further described in the main docs
@@ -211,6 +321,10 @@ site.
 The documentation site, served on [jupyterlite.rtfd.io], uses information from different
 parts of the software lifecycle (e.g. contains an archive of the built `app` directory),
 so using the [doit](#doit) tools are recommended.
+
+Additionally, some of the documentation is written in executable `.ipynb` which are
+converted by [myst](https://myst-nb.readthedocs.io): use of `doit serve:lab` is
+encouraged for editing these.
 
 [jupyterlite.rtfd.io]: https://jupyterlite.rtfd.io
 
@@ -292,15 +406,10 @@ page, including:
 > You must be logged in to GitHub to download these.
 
 [actions]: https://github.com/jupyterlite/jupyterlite/actions
-
-### Releasing
-
-> TBD: See [#121].
-
-[#121]: https://github.com/jupyterlite/jupyterlite/issues/121
 [issues]: https://github.com/jupyterlite/jupyterlite/issues
 [new issue]: https://github.com/jupyterlite/jupyterlite/issues/new
 [pull requests]: https://github.com/jupyterlite/jupyterlite/pulls
 [repo]: https://github.com/jupyterlite/jupyterlite
 [coc]: https://github.com/jupyter/governance/blob/master/conduct/code_of_conduct.md
 [mambaforge]: https://github.com/conda-forge/miniforge
+[dodo]: https://github.com/jupyterlite/jupyterlite/blob/main/dodo.py
